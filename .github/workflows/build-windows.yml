@@ -1,0 +1,25 @@
+name: Build Windows VST3
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, master]
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure (downloads JUCE automatically)
+        run: cmake -S FireProgress-VST/FireProgress -B build -DCMAKE_BUILD_TYPE=Release -DFIRE_COPY_AFTER_BUILD=OFF
+
+      - name: Build
+        run: cmake --build build --config Release
+
+      - name: Upload plugin
+        uses: actions/upload-artifact@v4
+        with:
+          name: FireProgress-Windows
+          path: build/FireProgress_artefacts/Release
+          if-no-files-found: error
