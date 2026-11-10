@@ -92,6 +92,10 @@ juce::AudioProcessorValueTreeState::ParameterLayout makeLayout() {
     using namespace juce;
     std::vector<std::unique_ptr<RangedAudioParameter>> p;
     StringArray notes, vs, counts, tones{"Piano", "Synth", "Pad"};
+    StringArray tradNames{"Choose a tradition..."}, ragaNames{"Off"}, gNames{"None"}, eNames{"None"}, oNames{"None"};
+    for (auto& t : fire::trads()) tradNames.add(t.name);
+    for (auto& r : fire::ragas()) ragaNames.add(r.name);
+    for (auto& st : fire::styles()) (st.cat == 0 ? gNames : st.cat == 1 ? eNames : oNames).add(st.name);
     for (auto n : fire::NOTE) notes.add(n);
     for (auto& v : fire::vibes()) vs.add(v.name);
     for (int i = 1; i <= 8; ++i) counts.add(String(i) + (i == 1 ? " chord" : " chords"));
@@ -107,10 +111,15 @@ juce::AudioProcessorValueTreeState::ParameterLayout makeLayout() {
     p.push_back(std::make_unique<AudioParameterFloat>(ParameterID{"human", 1}, "Humanize", NormalisableRange<float>(0.f, 100.f, 1.f), 55.f));
     p.push_back(std::make_unique<AudioParameterChoice>(ParameterID{"csound", 1}, "Chord sound", tones, 0));
     p.push_back(std::make_unique<AudioParameterChoice>(ParameterID{"msound", 1}, "Melody sound", tones, 1));
+    p.push_back(std::make_unique<AudioParameterChoice>(ParameterID{"trad", 1}, "World tradition", tradNames, 0));
+    p.push_back(std::make_unique<AudioParameterChoice>(ParameterID{"raga", 1}, "Indian raga", ragaNames, 0));
+    p.push_back(std::make_unique<AudioParameterChoice>(ParameterID{"sgen", 1}, "Popular genre", gNames, 0));
+    p.push_back(std::make_unique<AudioParameterChoice>(ParameterID{"selec", 1}, "Electronic style", eNames, 0));
+    p.push_back(std::make_unique<AudioParameterChoice>(ParameterID{"sother", 1}, "Other style", oNames, 0));
     p.push_back(std::make_unique<AudioParameterBool>(ParameterID{"chords", 1}, "Chords", true));
     p.push_back(std::make_unique<AudioParameterBool>(ParameterID{"melody", 1}, "Melody", true));
     p.push_back(std::make_unique<AudioParameterFloat>(ParameterID{"bpm", 1}, "Tempo (standalone)",
-                                                      NormalisableRange<float>(60.f, 160.f, 1.f), 100.f));
+                                                      NormalisableRange<float>(40.f, 200.f, 1.f), 100.f));
     p.push_back(std::make_unique<AudioParameterBool>(ParameterID{"run", 1}, "Play (standalone)", false));
     return { p.begin(), p.end() };
 }
@@ -127,6 +136,9 @@ FireProgressProcessor::FireProgressProcessor()
     pGen = apvts.getRawParameterValue("gen");       pBars = apvts.getRawParameterValue("bars");
     pCount = apvts.getRawParameterValue("count");   pHuman = apvts.getRawParameterValue("human");
     pCSound = apvts.getRawParameterValue("csound"); pMSound = apvts.getRawParameterValue("msound");
+    pTrad = apvts.getRawParameterValue("trad");     pRaga = apvts.getRawParameterValue("raga");
+    pSG = apvts.getRawParameterValue("sgen");       pSE = apvts.getRawParameterValue("selec");
+    pSO = apvts.getRawParameterValue("sother");
     for (int i = 0; i < 12; ++i) chordSynth.addVoice(new Voice(true, pCSound));
     for (int i = 0; i < 8; ++i)  leadSynth.addVoice(new Voice(false, pMSound));
     chordSynth.addSound(new Sound()); leadSynth.addSound(new Sound());
@@ -139,21 +151,25 @@ void FireProgressProcessor::prepareToPlay(double sampleRate, int) {
     internalBeat = 0.0; lastEnd = -1.0; wasRunning = false;
 }
 
+void FireProgressProcessor::readKey(int* k) const {
+    k[0] = (int) pRoot->load();   k[1] = (int) pMode->load();   k[2] = (int) pVibe->load();  k[3] = (int) pProg->load();
+    k[4] = (int) pSeed->load();   k[5] = pChords->load() > 0.5f ? 1 : 0;  k[6] = pMelody->load() > 0.5f ? 1 : 0;
+    k[7] = (int) pSource->load(); k[8] = (int) pGen->load();    k[9] = (int) pBars->load();  k[10] = (int) pCount->load();
+    k[11] = (int) pHuman->load(); k[12] = (int) pTrad->load();  k[13] = (int) pRaga->load(); k[14] = (int) pSG->load();
+    k[15] = (int) pSE->load();    k[16] = (int) pSO->load();
+}
+
 void FireProgressProcessor::refreshPattern() {
-    const int k[12] = { (int) pRoot->load(), (int) pMode->load(), (int) pVibe->load(), (int) pProg->load(),
-                        (int) pSeed->load(), pChords->load() > 0.5f ? 1 : 0, pMelody->load() > 0.5f ? 1 : 0,
-                        (int) pSource->load(), (int) pGen->load(), (int) pBars->load(), (int) pCount->load(),
-                        (int) pHuman->load() };
-    if (std::equal(k, k + 12, key)) return;
-    std::copy(k, k + 12, key);
+    int k[17]; readKey(k);
+    if (std::equal(k, k + 17, key)) return;
+    std::copy(k, k + 17, key);
     flush = true;
 
-    const bool minor = (k[1] == 1);
-    const int bars = (k[9] == 1) ? 8 : 4;
-    const auto segs = fire::buildSegs(k[7], k[2], minor, k[3], k[8], k[10] + 1, bars);
-    const auto mel = fire::makeMelody(segs, bars, k[0], minor, fire::vibes()[(size_t) k[2]].density, (unsigned) k[4]);
-    pattern.loopBeats = bars * 4.0;
-    pattern.events = fire::buildEvents(segs, mel, bars, k[0], k[5] != 0, k[6] != 0, (float) k[11] / 100.0f, (unsigned) k[4]);
+    const fire::Setup s = fire::setupFromParams(k[0], k[1], k[2], k[3], k[7], k[8], k[9], k[10], k[12], k[13], k[14], k[15], k[16]);
+    const auto segs = fire::buildSegs(s);
+    const auto mel = fire::makeMelody(s, segs, (unsigned) k[4]);
+    pattern.loopBeats = s.bars * 4.0;
+    pattern.events = fire::buildEvents(s, segs, mel, k[5] != 0, k[6] != 0, (float) k[11] / 100.0f, (unsigned) k[4]);
 }
 
 void FireProgressProcessor::processBlock(juce::AudioBuffer<float>& buf, juce::MidiBuffer& midi) {
@@ -213,15 +229,15 @@ void FireProgressProcessor::processBlock(juce::AudioBuffer<float>& buf, juce::Mi
 }
 
 // ------------------------------------------------------------------ melody memory
-int FireProgressProcessor::freshSeed(const std::vector<fire::Seg>& segs, int bars, int root, bool minor, float dens) {
+int FireProgressProcessor::freshSeed(const fire::Setup& s, const std::vector<fire::Seg>& segs) {
     auto& rnd = juce::Random::getSystemRandom();
     const juce::ScopedLock sl(usedLock);
-    int s = 0;
+    int sd = 0;
     for (int i = 0; i < 400; ++i) {
-        s = rnd.nextInt(10000);
-        if (used.count(fire::melodyHash(fire::makeMelody(segs, bars, root, minor, dens, (unsigned) s))) == 0) return s;
+        sd = rnd.nextInt(10000);
+        if (used.count(fire::melodyHash(fire::makeMelody(s, segs, (unsigned) sd))) == 0) return sd;
     }
-    return s;   // everything we tried was already used; the UI will say "Used before"
+    return sd;   // everything we tried was already used; the UI will say "Used before"
 }
 
 void FireProgressProcessor::trackMelody(uint64_t h) {
@@ -263,14 +279,13 @@ FireProgressProcessor::Snap FireProgressProcessor::historyAt(int index) {
 
 // ------------------------------------------------------------------ MIDI export (drag into the DAW)
 juce::File FireProgressProcessor::exportMidi(bool chordsPart) {
-    const int root = (int) pRoot->load(), vibe = (int) pVibe->load();
-    const bool minor = pMode->load() > 0.5f;
-    const int bars = ((int) pBars->load() == 1) ? 8 : 4;
-    const auto segs = fire::buildSegs((int) pSource->load(), vibe, minor, (int) pProg->load(), (int) pGen->load(),
-                                      (int) pCount->load() + 1, bars);
-    const unsigned seed = (unsigned) pSeed->load();
-    const auto mel = fire::makeMelody(segs, bars, root, minor, fire::vibes()[(size_t) vibe].density, seed);
-    const auto ev = fire::buildEvents(segs, mel, bars, root, chordsPart, !chordsPart, pHuman->load() / 100.0f, seed);
+    int k[17]; readKey(k);
+    const fire::Setup s = fire::setupFromParams(k[0], k[1], k[2], k[3], k[7], k[8], k[9], k[10], k[12], k[13], k[14], k[15], k[16]);
+    const unsigned seed = (unsigned) k[4];
+    const auto segs = fire::buildSegs(s);
+    const auto mel = fire::makeMelody(s, segs, seed);
+    const auto ev = fire::buildEvents(s, segs, mel, chordsPart, !chordsPart, (float) k[11] / 100.0f, seed);
+    const int root = s.root, bars = s.bars;
     const double bpm = hostSynced.load() ? hostBpm.load() : (double) pBpm->load();
 
     juce::MidiMessageSequence tempoTrack, seq;
@@ -291,9 +306,11 @@ juce::File FireProgressProcessor::exportMidi(bool chordsPart) {
 
     auto dir = juce::File::getSpecialLocation(juce::File::tempDirectory).getChildFile("FireProgress");
     dir.createDirectory();
+    const juce::String tag = (fire::isRaga(s) ? juce::String("Raga") + juce::String(fire::ragas()[(size_t) s.raga].name)
+                                               : juce::String(fire::tradOf(s).name).replace(" Music", ""))
+                                 .retainCharacters("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789");
     const juce::String name = juce::String("FireProgress_") + (chordsPart ? "Chords" : "Melody") + "_"
-        + juce::String(fire::NOTE[root]).replace("#", "s") + (minor ? "min" : "maj") + "_"
-        + juce::String(fire::vibes()[(size_t) vibe].name) + "_" + juce::String(bars) + "bars_"
+        + juce::String(fire::NOTE[root]).replace("#", "s") + "_" + tag + "_" + juce::String(bars) + "bars_"
         + juce::String(juce::Time::getCurrentTime().toMilliseconds() % 100000) + ".mid";
     auto out = dir.getChildFile(name);
     out.deleteFile();
@@ -344,9 +361,9 @@ void FireProgressProcessor::setStateInformation(const void* data, int size) {
                 hist.clear();
                 for (auto& e : juce::StringArray::fromTokens(apvts.state.getProperty("hist").toString(), ";", "")) {
                     auto f = juce::StringArray::fromTokens(e, ",", "");
-                    if (f.size() != 9) continue;
+                    if (f.size() != 14) continue;
                     Snap s;
-                    for (int i = 0; i < 9; ++i) s[(size_t) i] = f[i].getIntValue();
+                    for (int i = 0; i < 14; ++i) s[(size_t) i] = f[i].getIntValue();
                     hist.push_back(s);
                 }
                 histPos = juce::jlimit(-1, (int) hist.size() - 1, (int) apvts.state.getProperty("hpos"));

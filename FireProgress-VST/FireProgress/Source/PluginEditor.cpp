@@ -71,7 +71,7 @@ void DragPad::mouseUp(const MouseEvent& e) {
 // ------------------------------------------------------------------ editor
 FireProgressEditor::FireProgressEditor(FireProgressProcessor& p) : AudioProcessorEditor(&p), proc(p) {
     setLookAndFeel(&lnf);
-    setSize(1100, 600);
+    setSize(1100, 720);
     setWantsKeyboardFocus(true);
 
     int id = 1;
@@ -80,6 +80,46 @@ FireProgressEditor::FireProgressEditor(FireProgressProcessor& p) : AudioProcesso
     barsBox.addItem("4 bars", 1); barsBox.addItem("8 bars", 2);
     for (int i = 1; i <= 8; ++i) countBox.addItem(String(i) + (i == 1 ? " chord" : " chords"), i);
     for (auto* c : { &rootBox, &modeBox, &barsBox, &countBox }) addAndMakeVisible(c);
+
+    // step 1: world tradition, Indian raga. step 2: styles. (filled by hand, changes trigger side effects)
+    tradBox.addItem("Choose a tradition...", 1);
+    for (size_t i = 0; i < fire::trads().size(); ++i) tradBox.addItem(String(fire::trads()[i].name), (int) i + 2);
+    ragaBox.addItem("Off", 1);
+    for (size_t i = 0; i < fire::ragas().size(); ++i) ragaBox.addItem(String(fire::ragas()[i].name), (int) i + 2);
+    genreBox.addItem("None", 1); electroBox.addItem("None", 1); otherBox.addItem("None", 1);
+    {
+        int gi = 2, ei = 2, oi = 2;
+        for (auto& st : fire::styles()) {
+            if (st.cat == 0) genreBox.addItem(String(st.name), gi++);
+            else if (st.cat == 1) electroBox.addItem(String(st.name), ei++);
+            else otherBox.addItem(String(st.name), oi++);
+        }
+    }
+    for (auto* c : { &tradBox, &ragaBox, &genreBox, &electroBox, &otherBox }) addAndMakeVisible(c);
+    tradBox.setSelectedItemIndex(geti("trad"), dontSendNotification);
+    ragaBox.setSelectedItemIndex(geti("raga"), dontSendNotification);
+    genreBox.setSelectedItemIndex(geti("sgen"), dontSendNotification);
+    electroBox.setSelectedItemIndex(geti("selec"), dontSendNotification);
+    otherBox.setSelectedItemIndex(geti("sother"), dontSendNotification);
+
+    tradBox.onChange = [this] {
+        setParam("trad", (float) tradBox.getSelectedItemIndex());
+        applyStyleDefaults(); refreshSeed();
+    };
+    ragaBox.onChange = [this] {
+        const int v = ragaBox.getSelectedItemIndex();
+        setParam("raga", (float) v);
+        if (v > 0) newGenerated();                       // raga mode: chords come from the raga only
+        else { setParam("source", 0.f); setParam("prog", 0.f); }
+        applyStyleDefaults(); refreshSeed();
+    };
+    auto styleChanged = [this] {
+        setParam("sgen", (float) genreBox.getSelectedItemIndex());
+        setParam("selec", (float) electroBox.getSelectedItemIndex());
+        setParam("sother", (float) otherBox.getSelectedItemIndex());
+        applyStyleDefaults(); refreshSeed();
+    };
+    genreBox.onChange = styleChanged; electroBox.onChange = styleChanged; otherBox.onChange = styleChanged;
 
     for (int i = 0; i < 7; ++i) {
         vibeBtn[i].setButtonText(fire::vibes()[(size_t) i].name);
@@ -98,7 +138,7 @@ FireProgressEditor::FireProgressEditor(FireProgressProcessor& p) : AudioProcesso
     newMelody.setToggleState(true, dontSendNotification);
     newMelody.onClick = [this] { refreshSeed(); };
 
-    // sounds: 1 Piano, 2 Synth, 3 Pad (for chords and for melody)
+    // sounds: Piano, Synth, Pad (for chords and for melody)
     const char* tones[3] = { "Piano", "Synth", "Pad" };
     for (int i = 0; i < 3; ++i) {
         cTone[i].setButtonText(tones[i]); mTone[i].setButtonText(tones[i]);
@@ -161,13 +201,24 @@ void FireProgressEditor::setParam(const char* id, float v) {
     }
 }
 
+void FireProgressEditor::syncCombo(ComboBox& box, const char* id) {
+    const int v = geti(id);
+    if (box.getSelectedItemIndex() != v) box.setSelectedItemIndex(v, dontSendNotification);
+}
+
+fire::Setup FireProgressEditor::setup() const {
+    return fire::setupFromParams(geti("root"), geti("mode"), geti("vibe"), geti("prog"), geti("source"), geti("gen"),
+                                 geti("bars"), geti("count"), geti("trad"), geti("raga"), geti("sgen"), geti("selec"), geti("sother"));
+}
+fire::Setup FireProgressEditor::setupFromSnap(const Snap& s) {
+    return fire::setupFromParams(s[0], s[1], s[2], s[4], s[3], s[5], s[8], s[7], s[9], s[10], s[11], s[12], s[13]);
+}
+
 // ---------------------------------------------------------------- progressions + melody
 // Every time the chords change (or you press New melody) we look for a melody that was never used before.
 void FireProgressEditor::refreshSeed() {
-    const int root = geti("root"), vibe = geti("vibe"), bars = barsOf();
-    const bool minor = geti("mode") == 1;
-    const auto segs = fire::buildSegs(geti("source"), vibe, minor, geti("prog"), geti("gen"), countOf(), bars);
-    setParam("seed", (float) proc.freshSeed(segs, bars, root, minor, fire::vibes()[(size_t) vibe].density));
+    const auto s = setup();
+    setParam("seed", (float) proc.freshSeed(s, fire::buildSegs(s)));
 }
 
 void FireProgressEditor::selectProgression(int source, int prog, int gen) {
@@ -175,33 +226,43 @@ void FireProgressEditor::selectProgression(int source, int prog, int gen) {
     refreshSeed();
 }
 
-// Builds a brand-new progression from the main chord. Skips anything already in the popular list or history.
-void FireProgressEditor::generate() {
-    const int vibe = geti("vibe"), count = countOf();
-    const bool minor = geti("mode") == 1;
-    int s = 0;
-    for (int t = 0; t < 40; ++t) {
-        s = Random::getSystemRandom().nextInt(10000);
-        const auto tok = fire::generatedTokens(vibe, minor, (unsigned) s, count);
+// New generated progression from the main chord (or from the raga). Skips anything already shown.
+void FireProgressEditor::newGenerated() {
+    auto t = setup();
+    int sd = 0;
+    for (int tries = 0; tries < 40; ++tries) {
+        sd = Random::getSystemRandom().nextInt(10000);
+        t.gen = sd;
+        const auto tok = fire::generatedTokens(t);
         bool dup = false;
-        for (int h : genHist) if (fire::generatedTokens(vibe, minor, (unsigned) h, count) == tok) dup = true;
-        for (int i = 0; i < 3; ++i) if (fire::popularTokens(vibe, minor, i, count) == tok) dup = true;
+        for (int h : genHist) { auto u = t; u.gen = h; if (fire::generatedTokens(u) == tok) dup = true; }
+        for (int i = 0; i < (int) fire::popularList(t).size(); ++i) if (fire::popularTokens(t, i) == tok) dup = true;
         if (!dup) break;
     }
-    genHist.insert(genHist.begin(), s);
+    genHist.insert(genHist.begin(), sd);
     if (genHist.size() > 3) genHist.pop_back();
-    selectProgression(1, 0, s);
+    setParam("source", 1.f); setParam("gen", (float) sd);
+}
+
+void FireProgressEditor::generate() { newGenerated(); refreshSeed(); }
+
+// Style / raga suggest a tempo (used by the standalone clock) and sounds. You can still change them afterwards.
+void FireProgressEditor::applyStyleDefaults() {
+    const auto mx = fire::mixOf(setup());
+    setParam("bpm", (float) jlimit(40, 200, mx.bpm));
+    if (mx.valid) { setParam("csound", (float) mx.cs); setParam("msound", (float) mx.ms); }
 }
 
 // ---------------------------------------------------------------- history + undo
 FireProgressEditor::Snap FireProgressEditor::snapshot() const {
-    return {{ geti("root"), geti("mode"), geti("vibe"), geti("source"), geti("prog"),
-              geti("gen"), geti("seed"), geti("count"), geti("bars") }};
+    return {{ geti("root"), geti("mode"), geti("vibe"), geti("source"), geti("prog"), geti("gen"), geti("seed"),
+              geti("count"), geti("bars"), geti("trad"), geti("raga"), geti("sgen"), geti("selec"), geti("sother") }};
 }
 
 void FireProgressEditor::applySnapshot(const Snap& s) {
-    static const char* ids[9] = { "root", "mode", "vibe", "source", "prog", "gen", "seed", "count", "bars" };
-    for (int i = 0; i < 9; ++i) setParam(ids[i], (float) s[(size_t) i]);
+    static const char* ids[14] = { "root", "mode", "vibe", "source", "prog", "gen", "seed", "count", "bars",
+                                   "trad", "raga", "sgen", "selec", "sother" };
+    for (int i = 0; i < 14; ++i) setParam(ids[i], (float) s[(size_t) i]);
     if (s[3] == 1 && std::find(genHist.begin(), genHist.end(), s[5]) == genHist.end()) {
         genHist.insert(genHist.begin(), s[5]);
         if (genHist.size() > 3) genHist.pop_back();
@@ -222,20 +283,38 @@ bool FireProgressEditor::keyPressed(const KeyPress& k) {
     return false;
 }
 
-String FireProgressEditor::describe(const Snap& s) const {
-    const int root = s[0], vibe = s[2];
-    const auto chords = fire::resolveChords(s[3], vibe, s[1] == 1, s[4], s[5], s[7] + 1);
-    std::string names; int n = 0;
-    for (auto& c : chords) {
-        if (n++ == 5) { names += " .."; break; }
-        names += (names.empty() ? "" : " ") + fire::chordName(root, c);
+String FireProgressEditor::labelOf(const fire::Setup& s) const {
+    String out;
+    if (fire::isRaga(s)) out = "Raga " + String(fire::ragas()[(size_t) s.raga].name);
+    else {
+        out = String(fire::tradOf(s).name).replace(" Music", "");
+        if (fire::tradEff(s) == 2 && !fire::hasStyle(s)) out += " - " + String(fire::vibes()[(size_t) s.vibe].name);
+        for (int k : { s.sg, s.se, s.so }) if (k >= 0) out += " + " + String(fire::styles()[(size_t) k].name);
     }
-    return String(names) + "\n" + String(fire::vibes()[(size_t) vibe].name) + " - " + String(s[8] == 1 ? 8 : 4) + " bars";
+    return out + " - " + String(s.bars) + " bars";
 }
 
-String FireProgressEditor::describeLine(const Snap& s) const {
-    const String key = String(fire::NOTE[s[0]]) + (s[1] == 1 ? " minor" : " major");
-    return key + "  |  " + describe(s).replace("\n", "  |  ");
+String FireProgressEditor::describe(const Snap& sn) const {
+    const auto s = setupFromSnap(sn);
+    std::string names; int n = 0;
+    for (auto& c : fire::resolveChords(s)) {
+        if (n++ == 5) { names += " .."; break; }
+        names += (names.empty() ? "" : " ") + fire::chordName(s.root, c);
+    }
+    return String(names) + "\n" + labelOf(s);
+}
+
+String FireProgressEditor::describeLine(const Snap& sn) const {
+    const auto s = setupFromSnap(sn);
+    const String key = String(fire::NOTE[s.root]) + (fire::isRaga(s) ? " (Sa)" : (s.minor ? " minor" : " major"));
+    return key + "  |  " + describe(sn).replace("\n", "  |  ");
+}
+
+// chip text: Roman numerals + chord names (functional), or chord names + degrees (modal / raga)
+String FireProgressEditor::chipText(const fire::Setup& s, const std::string& tok) const {
+    const String names(fire::progNames(s, tok));
+    if (fire::isModal(s)) return names + "\ndegrees " + String(tok);
+    return String(tok) + "\n" + names;
 }
 
 void FireProgressEditor::showHistoryList() {
@@ -250,28 +329,39 @@ void FireProgressEditor::showHistoryList() {
 
 // ---------------------------------------------------------------- timer
 void FireProgressEditor::timerCallback() {
-    const int vibe = geti("vibe"), src = geti("source"), prog = geti("prog"), gen = geti("gen"), root = geti("root");
-    const int bars = barsOf(), count = countOf();
-    const bool minor = geti("mode") == 1;
+    const auto s = setup();
+    const bool ragaOn = fire::isRaga(s), step1 = s.trad > 0 || ragaOn, modal = fire::isModal(s);
 
     proc.recordSnapshot(snapshot());
 
-    for (int i = 0; i < 7; ++i) vibeBtn[i].setToggleState(i == vibe, dontSendNotification);
-    const int plen = (int) fire::progList(vibe, minor).size();
+    syncCombo(tradBox, "trad"); syncCombo(ragaBox, "raga"); syncCombo(genreBox, "sgen");
+    syncCombo(electroBox, "selec"); syncCombo(otherBox, "sother");
+
+    // Rules: pick a tradition first (step 1), then styles (step 2). A raga switches all of that off.
+    auto gate = [](Component& c, bool on) { c.setEnabled(on); c.setAlpha(on ? 1.0f : 0.4f); };
+    gate(tradBox, !ragaOn);
+    for (auto* c : { &genreBox, &electroBox, &otherBox }) gate(*c, s.trad > 0 && !ragaOn);
+    gate(modeBox, !ragaOn && !modal);
+    for (int i = 0; i < 7; ++i) gate(vibeBtn[i], step1 && !ragaOn);
+    gate(generateBtn, step1); gate(newMelody, step1);
+
+    for (int i = 0; i < 7; ++i) vibeBtn[i].setToggleState(i == s.vibe, dontSendNotification);
+    const int plen = (int) fire::popularList(s).size();
     for (int i = 0; i < 3; ++i) {
         const bool vis = i < plen;
         popBtn[i].setVisible(vis);
         if (vis) {
-            const auto tok = fire::popularTokens(vibe, minor, i, count);
-            popBtn[i].setButtonText(String(tok) + "\n" + String(fire::progNames(root, tok)));
-            popBtn[i].setToggleState(src == 0 && i == prog % plen, dontSendNotification);
+            popBtn[i].setButtonText(chipText(s, fire::popularTokens(s, i)));
+            popBtn[i].setToggleState(!ragaOn && s.source == 0 && i == s.prog % plen, dontSendNotification);
+            gate(popBtn[i], step1);
         }
         const bool gv = i < (int) genHist.size();
         genBtn[i].setVisible(gv);
         if (gv) {
-            const auto tok = fire::generatedTokens(vibe, minor, (unsigned) genHist[(size_t) i], count);
-            genBtn[i].setButtonText(String(tok) + "\n" + String(fire::progNames(root, tok)));
-            genBtn[i].setToggleState(src == 1 && genHist[(size_t) i] == gen, dontSendNotification);
+            auto t = s; t.gen = genHist[(size_t) i];
+            genBtn[i].setButtonText(chipText(t, fire::generatedTokens(t)));
+            genBtn[i].setToggleState((ragaOn || s.source == 1) && genHist[(size_t) i] == s.gen, dontSendNotification);
+            gate(genBtn[i], step1);
         }
     }
     for (int i = 0; i < 3; ++i) {
@@ -292,8 +382,7 @@ void FireProgressEditor::timerCallback() {
     undoBtn.setEnabled(hp > 0);
     redoBtn.setEnabled(hp < hs - 1);
 
-    const auto segs = fire::buildSegs(src, vibe, minor, prog, gen, count, bars);
-    proc.trackMelody(fire::melodyHash(fire::makeMelody(segs, bars, root, minor, fire::vibes()[(size_t) vibe].density, (unsigned) geti("seed"))));
+    proc.trackMelody(fire::melodyHash(fire::makeMelody(s, fire::buildSegs(s), (unsigned) geti("seed"))));
 
     const bool synced = proc.hostSynced.load();
     playBtn.setEnabled(!synced);
@@ -311,7 +400,22 @@ void FireProgressEditor::resized() {
     r.removeFromLeft(16);
     auto right = r;
 
-    // ---- left column: main chord, progressions, history
+    // ---- left column: style (steps 1 + 2 + raga), main chord, progressions, history
+    cardStyle = left.removeFromTop(134);
+    {
+        auto c = cardStyle.reduced(14, 10); c.removeFromTop(18);
+        auto lab1 = c.removeFromTop(14); auto row1 = c.removeFromTop(28); c.removeFromTop(4);
+        auto lab2 = c.removeFromTop(14); auto row2 = c.removeFromTop(28);
+        const int hw = (row1.getWidth() - 16) / 2;
+        lblTrad = lab1.removeFromLeft(hw); lab1.removeFromLeft(16); lblRaga = lab1;
+        tradBox.setBounds(row1.removeFromLeft(hw)); row1.removeFromLeft(16); ragaBox.setBounds(row1);
+        const int tw = (row2.getWidth() - 16) / 3;
+        lblGenre = lab2.removeFromLeft(tw); lab2.removeFromLeft(8); lblElec = lab2.removeFromLeft(tw); lab2.removeFromLeft(8); lblOther = lab2;
+        genreBox.setBounds(row2.removeFromLeft(tw)); row2.removeFromLeft(8);
+        electroBox.setBounds(row2.removeFromLeft(tw)); row2.removeFromLeft(8);
+        otherBox.setBounds(row2);
+    }
+    left.removeFromTop(10);
     cardMain = left.removeFromTop(120);
     {
         auto c = cardMain.reduced(14, 10); c.removeFromTop(22);
@@ -326,7 +430,7 @@ void FireProgressEditor::resized() {
         for (int i = 0; i < 7; ++i) vibeBtn[i].setBounds(vr.removeFromLeft(w).reduced(2, 0));
     }
     left.removeFromTop(10);
-    cardProg = left.removeFromTop(204);
+    cardProg = left.removeFromTop(178);
     {
         auto c = cardProg.reduced(14, 10);
         auto head = c.removeFromTop(26);
@@ -335,8 +439,8 @@ void FireProgressEditor::resized() {
         auto colR = c;
         generateBtn.setBounds(head.removeFromRight(110).withSizeKeepingCentre(110, 24));
         for (int i = 0; i < 3; ++i) {
-            popBtn[i].setBounds(colL.removeFromTop(46)); colL.removeFromTop(6);
-            genBtn[i].setBounds(colR.removeFromTop(46)); colR.removeFromTop(6);
+            popBtn[i].setBounds(colL.removeFromTop(40)); colL.removeFromTop(6);
+            genBtn[i].setBounds(colR.removeFromTop(40)); colR.removeFromTop(6);
         }
     }
     left.removeFromTop(10);
@@ -352,10 +456,12 @@ void FireProgressEditor::resized() {
         for (int i = 0; i < 4; ++i) histBtn[i].setBounds(c.removeFromLeft(w).reduced(2, 0));
     }
 
-    // ---- right column: chord cards, melody
+    // ---- right column: chord cards, melody, info
     chordArea = right.removeFromTop(84);
     right.removeFromTop(10);
-    cardMel = right;
+    cardMel = right.removeFromTop(338);
+    right.removeFromTop(10);
+    cardInfo = right;
     {
         auto c = cardMel.reduced(14, 10); c.removeFromTop(22);
         auto rowB = c.removeFromBottom(34);
@@ -389,14 +495,49 @@ void FireProgressEditor::resized() {
 }
 
 // ---------------------------------------------------------------- painting
+void FireProgressEditor::paintInfo(Graphics& g, const fire::Setup& s) {
+    auto c = cardInfo.reduced(14, 10); c.removeFromTop(18);
+    g.setColour(kText);
+    if (!(s.trad > 0 || fire::isRaga(s))) {
+        g.setFont(13.f);
+        g.drawFittedText("Start with step 1: choose a world music tradition (or an Indian raga). Then pick a style in step 2 "
+                         "and press Generate or New melody.", c, Justification::topLeft, 4);
+        return;
+    }
+    if (fire::isRaga(s)) {
+        const auto& r = fire::ragas()[(size_t) s.raga];
+        String notes;
+        for (int x : r.notes) notes += String(fire::SWARA[x % 12]) + " ";
+        g.setFont(Font(15.f, Font::bold));
+        g.drawText("Raga " + String(r.name) + "  -  " + String(r.mood), c.removeFromTop(22), Justification::centredLeft);
+        g.setColour(kMut); g.setFont(12.f);
+        g.drawText("Notes: " + notes + "   Vadi: " + String(fire::SWARA[r.vadi % 12]) + "   Samvadi: " + String(fire::SWARA[r.samvadi % 12]),
+                   c.removeFromTop(18), Justification::centredLeft);
+        g.drawFittedText("Raga mode is ON. Tradition, style, mode and vibe are switched off. Chords and melody use only this "
+                         "raga's notes (Sa = " + String(fire::NOTE[s.root]) + ").", c, Justification::topLeft, 3);
+        return;
+    }
+    const auto mx = fire::mixOf(s);
+    String scale;
+    for (int x : fire::melodyScale(s)) scale += String(fire::NOTE[(s.root + x) % 12]) + " ";
+    g.setFont(Font(15.f, Font::bold));
+    g.drawText(labelOf(s), c.removeFromTop(22), Justification::centredLeft);
+    g.setColour(kMut); g.setFont(12.f);
+    g.drawText("Scale: " + scale, c.removeFromTop(18), Justification::centredLeft);
+    g.drawFittedText("Tempo " + String(mx.bpm) + " BPM  |  Chord rhythm: " + String(fire::patName(mx.pat)) + "  |  Chords: " +
+                     String(fire::soundName(mx.valid ? mx.cs : geti("csound"))) + ", melody: " +
+                     String(fire::soundName(mx.valid ? mx.ms : geti("msound"))), c, Justification::topLeft, 2);
+}
+
 void FireProgressEditor::paint(Graphics& g) {
     g.setGradientFill(ColourGradient(kBg2, 0.f, 0.f, kBg1, 0.f, (float) getHeight(), false));
     g.fillAll();
 
-    const int root = geti("root"), vibe = geti("vibe"), src = geti("source"), bars = barsOf(), count = countOf();
-    const bool minor = geti("mode") == 1;
-    const auto segs = fire::buildSegs(src, vibe, minor, geti("prog"), geti("gen"), count, bars);
-    const auto mel = fire::makeMelody(segs, bars, root, minor, fire::vibes()[(size_t) vibe].density, (unsigned) geti("seed"));
+    const auto s = setup();
+    const bool ragaOn = fire::isRaga(s);
+    const auto segs = fire::buildSegs(s);
+    const auto mel = fire::makeMelody(s, segs, (unsigned) geti("seed"));
+    const int root = s.root, bars = s.bars, count = s.count;
     const double L = bars * 4.0, beat = proc.currentBeat.load();
     int cur = -1;
     if (beat >= 0.0) for (size_t i = 0; i < segs.size(); ++i) if (beat >= segs[i].start) cur = (int) i;
@@ -422,27 +563,39 @@ void FireProgressEditor::paint(Graphics& g) {
         g.setColour(kCard); g.fillRoundedRectangle(r.toFloat(), 14.f);
         g.setColour(kLine); g.drawRoundedRectangle(r.toFloat().reduced(0.5f), 14.f, 1.f);
         g.setColour(kMut); g.setFont(Font(11.f, Font::bold));
-        g.drawText(label, r.getX() + 14, r.getY() + 8, 300, 16, Justification::centredLeft);
+        g.drawText(label, r.getX() + 14, r.getY() + 8, 460, 16, Justification::centredLeft);
     };
-    card(cardMain, "MAIN CHORD,  PATTERN SIZE  &  VIBE");
-    card(cardProg, "POPULAR");
+    card(cardStyle, "STEP 1: WORLD MUSIC   >   STEP 2: STYLE   |   OR PICK AN INDIAN RAGA");
+    card(cardMain, ragaOn ? "KEY (Sa),  PATTERN SIZE  &  CHORDS" : "MAIN CHORD,  PATTERN SIZE  &  VIBE");
+    card(cardProg, ragaOn ? "POPULAR  (off in raga mode)" : "POPULAR");
     card(cardMel, "MELODY");
     card(cardHist, "HISTORY   (Ctrl+Z undo, Ctrl+Shift+Z redo)");
-    {
-        auto c = cardProg.reduced(14, 10);
-        c.removeFromLeft((c.getWidth() - 12) / 2 + 12);
-        g.setColour(kMut); g.setFont(Font(11.f, Font::bold));
-        g.drawText("GENERATED", c.getX(), cardProg.getY() + 8, 200, 16, Justification::centredLeft);
-        if (genHist.empty()) {
-            g.setFont(12.f);
-            g.drawFittedText("Press Generate to build new progressions that start on your main chord.",
-                             c.withTrimmedTop(30), Justification::topLeft, 3);
-        }
-    }
-    g.setColour(kMut); g.setFont(Font(11.f, Font::bold));
+    card(cardInfo, "WHAT YOU ARE PLAYING");
+    paintInfo(g, s);
+
+    g.setColour(kMut); g.setFont(Font(10.f, Font::bold));
+    g.drawText("1  WORLD MUSIC (choose first)", lblTrad, Justification::centredLeft);
+    g.drawText("INDIAN RAGA (switches the rest off)", lblRaga, Justification::centredLeft);
+    g.drawText("2  POPULAR GENRE", lblGenre, Justification::centredLeft);
+    g.drawText("2  ELECTRONIC", lblElec, Justification::centredLeft);
+    g.drawText("2  OTHER STYLE", lblOther, Justification::centredLeft);
+    g.setFont(Font(11.f, Font::bold));
     g.drawText("CHORD SOUND", lblCT, Justification::centredLeft);
     g.drawText("MELODY SOUND", lblMT, Justification::centredLeft);
     g.drawText("HUMANIZE", lblH, Justification::centredLeft);
+    {
+        auto c = cardProg.reduced(14, 10);
+        auto colL = c.removeFromLeft((c.getWidth() - 12) / 2);
+        c.removeFromLeft(12);
+        g.drawText("GENERATED", c.getX(), cardProg.getY() + 8, 200, 16, Justification::centredLeft);
+        g.setFont(12.f);
+        if (ragaOn)
+            g.drawFittedText("Raga mode: Popular progressions are off. Use Generate for chords built only from the raga's notes.",
+                             colL.withTrimmedTop(18), Justification::topLeft, 4);
+        if (genHist.empty())
+            g.drawFittedText("Press Generate to build new progressions from your main chord (or from the raga).",
+                             c.withTrimmedTop(30), Justification::topLeft, 3);
+    }
 
     // chord cards: width follows how long each chord lasts
     for (size_t i = 0; i < segs.size(); ++i) {
@@ -494,9 +647,10 @@ void FireProgressEditor::paint(Graphics& g) {
             g.drawText(String(fire::chordName(root, segs[i].chord)), (int) x + 3, (int) rr.getY() + 1, 60, 12, Justification::centredLeft);
         }
         g.setColour(kGold);
-        for (auto& n : mel)
-            g.fillRoundedRectangle(rr.getX() + (float) n.step * sw + 1.f, rr.getBottom() - (float) (n.midi - 58) * nh,
-                                   jmax((float) n.len * sw - 2.f, 4.f), nh - 1.f, 2.f);
+        for (auto& n : mel) {
+            const float y = jmax(rr.getY(), rr.getBottom() - (float) (n.midi - 58) * nh);
+            g.fillRoundedRectangle(rr.getX() + (float) n.step * sw + 1.f, y, jmax((float) n.len * sw - 2.f, 4.f), nh - 1.f, 2.f);
+        }
         if (beat >= 0.0) {
             g.setColour(kText);
             g.fillRect(rr.getX() + (float) (beat / L) * rr.getWidth() - 1.f, rr.getY(), 2.f, rr.getHeight());

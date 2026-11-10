@@ -6,8 +6,9 @@
 
 class FireProgressProcessor : public juce::AudioProcessor {
 public:
-    // One entry of the history: root, mode, vibe, source, prog, gen, seed, count, bars (raw parameter values)
-    using Snap = std::array<int, 9>;
+    // One entry of the history (raw parameter values): root, mode, vibe, source, prog, gen, seed, count, bars,
+    // trad, raga, sgen, selec, sother
+    using Snap = std::array<int, 14>;
 
     FireProgressProcessor();
     ~FireProgressProcessor() override = default;
@@ -40,7 +41,7 @@ public:
     std::atomic<double> hostBpm { 100.0 };
 
     // ---- message-thread helpers (used by the editor) ----
-    int  freshSeed(const std::vector<fire::Seg>& segs, int bars, int root, bool minor, float density);
+    int  freshSeed(const fire::Setup& s, const std::vector<fire::Seg>& segs);
     void trackMelody(uint64_t hash);
     bool melodyIsRepeat();
     int  usedCount();
@@ -57,13 +58,14 @@ public:
 private:
     struct Pattern { std::vector<fire::Ev> events; double loopBeats = 16.0; } pattern;
     void refreshPattern();
+    void readKey(int* k) const;      // 17 raw parameter values
 
-    int key[12] = { -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 };
+    int key[17] = { -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 };
     bool flush = false, wasRunning = false;
     double internalBeat = 0.0, lastEnd = -1.0, sr = 44100.0;
     juce::Synthesiser chordSynth, leadSynth;
     std::atomic<float> *pRoot, *pMode, *pVibe, *pProg, *pSeed, *pChords, *pMelody, *pBpm, *pRun, *pSource, *pGen,
-                       *pBars, *pCount, *pHuman, *pCSound, *pMSound;
+                       *pBars, *pCount, *pHuman, *pCSound, *pMSound, *pTrad, *pRaga, *pSG, *pSE, *pSO;
 
     juce::CriticalSection usedLock;            // melody memory (message thread only)
     std::unordered_set<uint64_t> used;

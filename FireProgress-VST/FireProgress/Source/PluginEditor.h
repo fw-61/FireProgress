@@ -49,12 +49,17 @@ private:
     void timerCallback() override;
     void setParam(const char* id, float v);
     int geti(const char* id) const { return (int) proc.apvts.getRawParameterValue(id)->load(); }
-    int barsOf() const { return geti("bars") == 1 ? 8 : 4; }
-    int countOf() const { return geti("count") + 1; }
+    void syncCombo(juce::ComboBox&, const char* id);
+
+    fire::Setup setup() const;                            // current settings as an engine Setup
+    static fire::Setup setupFromSnap(const Snap&);
 
     void refreshSeed();                                   // picks a melody that was never used before
     void selectProgression(int source, int prog, int gen);
+    void newGenerated();                                  // new generated progression (no melody refresh)
     void generate();
+    void applyStyleDefaults();                            // tempo + sounds suggested by the chosen style / raga
+    void paintInfo(juce::Graphics&, const fire::Setup&);
 
     Snap snapshot() const;
     void applySnapshot(const Snap&);
@@ -62,12 +67,15 @@ private:
     void redo();
     void jumpTo(int index);
     void showHistoryList();
-    juce::String describe(const Snap&) const;             // two lines: chords / vibe + size
+    juce::String labelOf(const fire::Setup&) const;       // e.g. "Japanese + Lo-fi - 8 bars"
+    juce::String describe(const Snap&) const;             // two lines: chords / label
     juce::String describeLine(const Snap&) const;         // one line for the popup list
+    juce::String chipText(const fire::Setup&, const std::string& tokens) const;
 
     FireLNF lnf;
     FireProgressProcessor& proc;
-    juce::ComboBox rootBox, modeBox, barsBox, countBox;
+    juce::ComboBox rootBox, modeBox, barsBox, countBox;                        // bound to parameters
+    juce::ComboBox tradBox, ragaBox, genreBox, electroBox, otherBox;          // handled by hand (side effects)
     juce::TextButton vibeBtn[7], popBtn[3], genBtn[3], histBtn[4], cTone[3], mTone[3],
                      generateBtn { "Generate" }, undoBtn { "Undo" }, redoBtn { "Redo" }, listBtn { "All" },
                      chordsBtn { "Chords" }, melodyBtn { "Melody" }, newMelody { "New melody" }, playBtn { "Play" };
@@ -80,5 +88,6 @@ private:
     std::vector<int> genHist;            // last generated progressions (newest first)
     int histIdx[4] = { -1, -1, -1, -1 };
     juce::String statusMsg;
-    juce::Rectangle<int> cardMain, cardProg, cardHist, chordArea, cardMel, rollArea, footer, lblCT, lblMT, lblH;
+    juce::Rectangle<int> cardStyle, cardMain, cardProg, cardHist, chordArea, cardMel, cardInfo, rollArea, footer,
+                         lblTrad, lblRaga, lblGenre, lblElec, lblOther, lblCT, lblMT, lblH;
 };
