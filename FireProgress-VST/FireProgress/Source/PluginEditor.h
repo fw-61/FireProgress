@@ -7,7 +7,7 @@ inline const juce::Colour kBg1(0xff130806), kBg2(0xff2f0f07), kCard(0xff22100b),
                           kText(0xffffeee3), kMut(0xffc79a85);
 }
 
-// Pill buttons: flame gradient when "on", two-line text for progression chips.
+// Pill buttons: flame gradient when "on", two-line text for chips.
 class FireLNF : public juce::LookAndFeel_V4 {
 public:
     FireLNF();
@@ -35,32 +35,50 @@ private:
 
 class FireProgressEditor : public juce::AudioProcessorEditor, private juce::Timer {
 public:
+    using Snap = FireProgressProcessor::Snap;
+
     explicit FireProgressEditor(FireProgressProcessor&);
     ~FireProgressEditor() override;
     void paint(juce::Graphics&) override;
     void resized() override;
+    bool keyPressed(const juce::KeyPress&) override;   // Ctrl+Z = undo, Ctrl+Shift+Z / Ctrl+Y = redo
+    void mouseDown(const juce::MouseEvent&) override { grabKeyboardFocus(); }
 
 private:
     using APVTS = juce::AudioProcessorValueTreeState;
     void timerCallback() override;
     void setParam(const char* id, float v);
     int geti(const char* id) const { return (int) proc.apvts.getRawParameterValue(id)->load(); }
+    int barsOf() const { return geti("bars") == 1 ? 8 : 4; }
+    int countOf() const { return geti("count") + 1; }
+
     void refreshSeed();                                   // picks a melody that was never used before
     void selectProgression(int source, int prog, int gen);
     void generate();
 
+    Snap snapshot() const;
+    void applySnapshot(const Snap&);
+    void undo();
+    void redo();
+    void jumpTo(int index);
+    void showHistoryList();
+    juce::String describe(const Snap&) const;             // two lines: chords / vibe + size
+    juce::String describeLine(const Snap&) const;         // one line for the popup list
+
     FireLNF lnf;
     FireProgressProcessor& proc;
-    juce::ComboBox rootBox, modeBox;
-    juce::TextButton vibeBtn[7], popBtn[3], genBtn[3], generateBtn { "Generate" },
+    juce::ComboBox rootBox, modeBox, barsBox, countBox;
+    juce::TextButton vibeBtn[7], popBtn[3], genBtn[3], histBtn[4], cTone[3], mTone[3],
+                     generateBtn { "Generate" }, undoBtn { "Undo" }, redoBtn { "Redo" }, listBtn { "All" },
                      chordsBtn { "Chords" }, melodyBtn { "Melody" }, newMelody { "New melody" }, playBtn { "Play" };
-    juce::Slider bpm;
+    juce::Slider bpm, humanSlider;
     DragPad padChords, padMelody;
-    std::unique_ptr<APVTS::ComboBoxAttachment> rootA, modeA;
+    std::unique_ptr<APVTS::ComboBoxAttachment> rootA, modeA, barsA, countA;
     std::unique_ptr<APVTS::ButtonAttachment> chordsA, melodyA, playA;
-    std::unique_ptr<APVTS::SliderAttachment> bpmA;
+    std::unique_ptr<APVTS::SliderAttachment> bpmA, humanA;
 
     std::vector<int> genHist;            // last generated progressions (newest first)
+    int histIdx[4] = { -1, -1, -1, -1 };
     juce::String statusMsg;
-    juce::Rectangle<int> cardMain, cardProg, chordArea, cardMel, rollArea, footer;
+    juce::Rectangle<int> cardMain, cardProg, cardHist, chordArea, cardMel, rollArea, footer, lblCT, lblMT, lblH;
 };
